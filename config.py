@@ -43,6 +43,8 @@ PROVIDERS = _list("PROVIDERS", ["CPUExecutionProvider"])
 DET_CONF = _float("DET_CONF", 0.5)            # SCRFD detector confidence
 EMBED_DIM = _int("EMBED_DIM", 512)
 
+MAX_OPTIMIZATION_THREADS = _int("MAX_OPTIMIZATION_THREADS", 1)  # Qdrant background optimization threads
+INDEXING_THRESHOLD = _int("INDEXING_THRESHOLD", 20000)  # Qdr
 # ---- storage paths ----
 DATA_DIR = _str("DATA_DIR", os.path.join(_HERE, "data"))
 INDEX_PATH = _str("INDEX_PATH", os.path.join(DATA_DIR, "faiss_index.bin"))

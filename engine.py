@@ -19,8 +19,8 @@ from qdrant_client.http.models import (
     Filter,
     FieldCondition,
     MatchValue,
+    OptimizersConfigDiff
 )
-
 from uniface.detection import SCRFD
 from uniface.recognition import ArcFace
 import config as C
@@ -56,6 +56,7 @@ class FaceEngine:
         self.collection = "faces"
         self._ensure_collection()
 
+
     def _ensure_collection(self):
         collections = [c.name for c in self.client.get_collections().collections]
         if self.collection not in collections:
@@ -65,8 +66,15 @@ class FaceEngine:
                     size=C.EMBED_DIM,
                     distance=Distance.COSINE,
                 ),
+                optimizers_config=OptimizersConfigDiff(
+                    # Free tier only has 0.5 vCPU → keep background work minimal
+                    max_optimization_threads=C.MAX_OPTIMIZATION_THREADS,  # 1 or 2 threads is enough
+                    # Don’t start indexing until we have a decent number of points
+                    indexing_threshold=C.INDEXING_THRESHOLD,   # ~20k points (adjust if needed)
+                ),
             )
-            # Indexes for fast filtering
+
+            # Payload indexes are still useful and cheap
             self.client.create_payload_index(
                 collection_name=self.collection,
                 field_name="businessId",
@@ -77,7 +85,6 @@ class FaceEngine:
                 field_name="studentId",
                 field_schema="keyword",
             )
-
     # -------------------------------------------------- helpers
     @staticmethod
     def _l2n(v):
