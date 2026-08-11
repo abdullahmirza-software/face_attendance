@@ -133,21 +133,23 @@
 
           <div class="panel">
             <form id="enrollForm" class="stack" autocomplete="off">
-              <div>
-                <label class="lbl">Business ID <span class="hint-inline">(UUID)</span></label>
-                <input class="form-control" id="fBusiness" type="text" placeholder="paste UUID or generate" required />
+              <div> 
+                  <label class="lbl">Business ID <span class="hint-inline">(UUID)</span></label> 
+                  <input class="form-control" id="fBusiness" type="text" placeholder="paste UUID or generate" required pattern="^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" title="Please enter a valid UUID v4 (e.g., 123e4567-e89b-12d3-a456-426614174000)"/> 
+              </div> 
+              <div> 
+                  <label class="lbl">Student ID <span class="hint-inline">(UUID)</span></label> 
+                  <div class="d-flex gap-2"> 
+                      <input class="form-control" id="fStudent" type="text" placeholder="paste UUID or generate" required pattern="^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" title="Please enter a valid UUID v4"/> 
+                      <button type="button" class="btn btn-ghost" id="genStudent" title="Generate UUID"><i class="bi bi-shuffle"></i></button> 
+                  </div> 
               </div>
-              <div>
-                <label class="lbl">Student ID <span class="hint-inline">(UUID)</span></label>
-                <div class="d-flex gap-2">
-                  <input class="form-control" id="fStudent" type="text" placeholder="paste UUID or generate" required />
-                  <button type="button" class="btn btn-ghost" id="genStudent" title="Generate UUID"><i class="bi bi-shuffle"></i></button>
-                </div>
+
+              <div> 
+                  <label class="lbl">Full name</label> 
+                  <input class="form-control" id="fName" type="text" placeholder="e.g. John Doe" required maxlength="250" pattern=".*\S.*" title="Name cannot be empty or just spaces" /> 
               </div>
-              <div>
-                <label class="lbl">Full name</label>
-                <input class="form-control" id="fName" type="text" placeholder="e.g. Ayesha Khan" required />
-              </div>
+
             </form>
 
             <div class="quality" id="enrollQuality" hidden>

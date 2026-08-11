@@ -12,6 +12,29 @@ import uuid
 import numpy as np
 import cv2
 
+# On a CPU-quota-limited container (e.g. Render's 0.1 vCPU), OpenCV's and
+# ONNXRuntime's default thread pools are sized off the host's full core
+# count. Every thread then fights the tiny quota for scheduling time, which
+# is what turns sub-second inference into multi-second/minute stalls with
+# wildly inconsistent latency. Force everything to a single thread so each
+# request gets the whole quota instead of thrashing against itself.
+cv2.setNumThreads(1)
+
+import onnxruntime as ort
+
+_ort_SessionOptions = ort.SessionOptions
+
+
+class _SingleThreadSessionOptions(_ort_SessionOptions):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.intra_op_num_threads = 1
+        self.inter_op_num_threads = 1
+        self.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+
+ort.SessionOptions = _SingleThreadSessionOptions
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 from qdrant_client.http.models import (
@@ -27,6 +50,16 @@ from uniface.detection import SCRFD
 from uniface.recognition import ArcFace
 import config as C
 
+try:
+    from uniface.constants import SCRFDWeights
+    _SCRFD_MODELS = {
+        "scrfd_500m": SCRFDWeights.SCRFD_500M_KPS,
+        "scrfd_10g": SCRFDWeights.SCRFD_10G_KPS,
+    }
+except Exception:
+    SCRFDWeights = None
+    _SCRFD_MODELS = {}
+
 
 def _f(x):
     return float(x)
@@ -41,7 +74,26 @@ class FaceEngine:
         self._lock = threading.Lock()
 
         # Models
-        self.detector = SCRFD(confidence_threshold=C.DET_CONF, providers=C.PROVIDERS)
+        # SCRFD's own preprocessing letterboxes every frame up to `input_size`
+        # before inference — our MAX_SIDE pre-resize doesn't reduce its cost.
+        # SCRFD_10G at 640x640 (the library default) is ~20x more FLOPs than
+        # SCRFD_500M, and this app's frames are close-up, cooperative faces
+        # (webcam selfie), so the small model at a smaller input size is
+        # plenty accurate and dramatically cheaper per frame.
+        det_input_side = getattr(C, "DET_INPUT_SIZE", 320)
+        det_model = _SCRFD_MODELS.get(getattr(C, "DET_MODEL", "scrfd_500m"))
+        try:
+            if det_model is None:
+                raise TypeError("SCRFD model selection not available in this uniface version")
+            self.detector = SCRFD(
+                model_name=det_model,
+                confidence_threshold=C.DET_CONF,
+                input_size=(det_input_side, det_input_side),
+                providers=C.PROVIDERS,
+            )
+        except TypeError:
+            # Older/newer uniface version without model_name/input_size kwargs
+            self.detector = SCRFD(confidence_threshold=C.DET_CONF, providers=C.PROVIDERS)
         self.recognizer = ArcFace(providers=C.PROVIDERS)
 
         # Qdrant (cloud free tier or local)

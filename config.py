@@ -41,6 +41,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # ---- ONNX / models ----
 PROVIDERS = _list("PROVIDERS", ["CPUExecutionProvider"])
 DET_CONF = _float("DET_CONF", 0.5)            # SCRFD detector confidence
+DET_MODEL = _str("DET_MODEL", "scrfd_500m")   # scrfd_500m (fast) or scrfd_10g (bigger/slower)
+DET_INPUT_SIZE = _int("DET_INPUT_SIZE", 320)  # SCRFD inference resolution (px); lower = faster
 EMBED_DIM = _int("EMBED_DIM", 512)
 LOW_RAM = _int("LOW_RAM", 1)                     # 1=low-RAM mode (no caching of embeddings)
 MAX_SIDE=_int("MAX_SIDE", 512)  # max side length for input images (downscale if larger)

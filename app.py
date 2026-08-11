@@ -7,6 +7,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.requests import Request
+from starlette.concurrency import run_in_threadpool
 
 import config as C
 from engine import FaceEngine
@@ -74,7 +75,8 @@ async def check_frame(frame: UploadFile = File(...)):
     buf = await frame.read()
     if len(buf) > MAX_FRAME_BYTES:
         raise HTTPException(413, "frame too large")
-    return JSONResponse(engine.check_frame(buf))
+    result = await run_in_threadpool(engine.check_frame, buf)
+    return JSONResponse(result)
 
 
 @app.post("/api/enroll")
@@ -102,7 +104,9 @@ async def enroll(
     if not bufs:
         raise HTTPException(400, "no usable frames")
 
-    result = engine.enroll(businessId.strip(), studentId.strip(), name.strip(), bufs)
+    result = await run_in_threadpool(
+        engine.enroll, businessId.strip(), studentId.strip(), name.strip(), bufs
+    )
     del bufs
 
     if not result.get("ok"):
@@ -134,7 +138,7 @@ async def verify(
         raise HTTPException(400, "no usable frames")
 
     bid = businessId.strip() if businessId else None
-    result = engine.recognize(bufs, business_id=bid)
+    result = await run_in_threadpool(engine.recognize, bufs, business_id=bid)
     del bufs
 
     if result.get("exists"):
@@ -167,7 +171,7 @@ async def client_config():
 
 @app.get("/api/students")
 async def students():
-    return JSONResponse(engine.list_students())
+    return JSONResponse(await run_in_threadpool(engine.list_students))
 
 
 @app.get("/api/logins")
