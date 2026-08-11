@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sentry — Face Attendance</title>
+
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <!-- Bootstrap Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" />
+  <!-- Font: Space Grotesk (display) + Inter (body) via Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <div class="app-shell">
+    <!-- Sidebar / brand -->
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-mark"><i class="bi bi-person-bounding-box"></i></div>
+        <div>
+          <div class="brand-name">Sentry</div>
+          <div class="brand-sub">face attendance</div>
+        </div>
+      </div>
+
+      <nav class="mode-switch">
+        <button class="mode-btn active" data-mode="verify">
+          <i class="bi bi-shield-check"></i>
+          <span>Check in</span>
+          <small>Verify a face &amp; sign in</small>
+        </button>
+        <button class="mode-btn" data-mode="enroll">
+          <i class="bi bi-camera-video"></i>
+          <span>Register</span>
+          <small>Enroll from a short video</small>
+        </button>
+      </nav>
+
+      <div class="side-foot">
+        <div class="stat">
+          <span class="stat-num" id="statStudents">—</span>
+          <span class="stat-lbl">enrolled</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="statLogins">—</span>
+          <span class="stat-lbl">sign-ins today</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+
+      <!-- ============ VERIFY MODE ============ -->
+      <section id="view-verify" class="view">
+        <header class="view-head">
+          <h1>Check in</h1>
+          <p>Look at the camera. We match your face against enrolled students and log the sign-in.</p>
+        </header>
+
+        <div class="work">
+          <div class="cam-wrap">
+            <div class="cam-frame" id="verifyFrame">
+              <video id="verifyVideo" autoplay playsinline muted></video>
+              <div class="reticle" id="verifyReticle"></div>
+              <div class="cam-hint" id="verifyHint">Starting camera…</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Business ID <span class="text-muted">(optional)</span></label>
+              <input type="text" id="verifyBusiness" class="form-control" placeholder="Leave empty to search all businesses">
+            </div>
+            <button class="btn btn-lg btn-primary w-100 mt-3" id="verifyBtn" disabled>
+              <i class="bi bi-fingerprint"></i> Verify me
+            </button>
+          </div>
+
+          <div class="panel" id="verifyResult">
+            <div class="result-empty">
+              <i class="bi bi-person-badge"></i>
+              <p>Result appears here after you verify.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="log-block">
+          <div class="log-head">
+            <h2>Recent sign-ins</h2>
+            <button class="btn btn-sm btn-ghost" id="refreshLogs"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+          </div>
+          <div class="table-responsive">
+            <table class="table align-middle mb-0">
+              <thead>
+                <tr><th>Name</th><th>Student</th><th>Probability</th><th>Time</th></tr>
+              </thead>
+              <tbody id="logBody">
+                <tr><td colspan="4" class="text-muted text-center py-4">No sign-ins yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ENROLL MODE ============ -->
+      <section id="view-enroll" class="view d-none">
+        <header class="view-head">
+          <h1>Register a student</h1>
+          <p>Enter details, then slowly turn the head left, right, up and down while we capture varied angles — like setting up a phone.</p>
+        </header>
+
+        <div class="work">
+          <div class="cam-wrap">
+            <div class="cam-frame" id="enrollFrame">
+              <video id="enrollVideo" autoplay playsinline muted></video>
+              <div class="reticle" id="enrollReticle"></div>
+              <div class="cam-hint" id="enrollHint">Fill in details to begin</div>
+              <div class="capture-ring" id="captureRing" hidden>
+                <svg viewBox="0 0 120 120"><circle class="ring-bg" cx="60" cy="60" r="54"/><circle class="ring-fg" id="ringFg" cx="60" cy="60" r="54"/></svg>
+                <span id="ringCount">0</span>
+              </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+              <button class="btn btn-lg btn-primary flex-grow-1" id="enrollBtn" disabled>
+                <i class="bi bi-record-circle"></i> Start capture
+              </button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <form id="enrollForm" class="stack" autocomplete="off">
+              <div>
+                <label class="lbl">Business ID <span class="hint-inline">(UUID)</span></label>
+                <input class="form-control" id="fBusiness" type="text" placeholder="paste UUID or generate" required />
+              </div>
+              <div>
+                <label class="lbl">Student ID <span class="hint-inline">(UUID)</span></label>
+                <div class="d-flex gap-2">
+                  <input class="form-control" id="fStudent" type="text" placeholder="paste UUID or generate" required />
+                  <button type="button" class="btn btn-ghost" id="genStudent" title="Generate UUID"><i class="bi bi-shuffle"></i></button>
+                </div>
+              </div>
+              <div>
+                <label class="lbl">Full name</label>
+                <input class="form-control" id="fName" type="text" placeholder="e.g. Ayesha Khan" required />
+              </div>
+            </form>
+
+            <div class="quality" id="enrollQuality" hidden>
+              <div class="q-row"><span>Face</span><b id="qFace">—</b></div>
+              <div class="q-row"><span>Distance</span><b id="qDist">—</b></div>
+              <div class="q-row"><span>Sharpness</span><b id="qSharp">—</b></div>
+            </div>
+
+            <div id="enrollResult"></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
