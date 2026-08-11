@@ -182,6 +182,7 @@ const RING_CIRCUM = 339;
 let liveTimer = null;
 let formOK = false;
 let capturing = false;
+let guideInFlight = false;
 
 function validateForm() {
   formOK =
@@ -276,14 +277,19 @@ async function runCapture() {
       ringCount.textContent = done;
       ringFg.style.strokeDashoffset = RING_CIRCUM * (1 - done / BURST_TARGET);
 
-      // Live guidance — only every N frames, fire-and-forget
-      if (i % guideEvery === 0) {
+      // Live guidance — only every N frames, and only if the previous
+      // check-frame call has already returned. The backend has ~0.1 CPU;
+      // firing another one before the last finishes just makes both queue
+      // up behind each other instead of either finishing sooner.
+      if (i % guideEvery === 0 && !guideInFlight) {
+        guideInFlight = true;
         const qfd = new FormData();
         qfd.append("frame", blob, "q.jpg");
         fetch(`${API}/api/check-frame`, { method: "POST", body: qfd })
           .then((r) => r.json())
           .then((q) => { if (capturing) paintQuality(q); })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => { guideInFlight = false; });
       }
 
       await sleep(window.LOW_RAM ? 50 : 40);

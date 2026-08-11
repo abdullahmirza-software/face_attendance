@@ -8,6 +8,7 @@ Quality controlled by LOW_RAM flag:
 import os
 import gc
 import threading
+import time as _time
 import uuid
 import numpy as np
 import cv2
@@ -68,10 +69,48 @@ def _i(x):
     return int(x)
 
 
+# Set DEBUG_TIMING=1 on Render to log a per-stage breakdown of every
+# check-frame/quality/match call, so the real bottleneck on the actual
+# throttled instance is visible instead of guessed at.
+_DEBUG_TIMING = str(os.getenv("DEBUG_TIMING", "0")).strip().lower() in ("1", "true", "yes")
+
+
+class _Lap:
+    """Cheap stage-timer. report() is a no-op unless DEBUG_TIMING is set."""
+
+    __slots__ = ("t0", "marks")
+
+    def __init__(self):
+        self.t0 = _time.perf_counter()
+        self.marks = []
+
+    def lap(self, name):
+        self.marks.append((name, _time.perf_counter()))
+
+    def report(self, label):
+        if not _DEBUG_TIMING:
+            return
+        prev = self.t0
+        parts = []
+        for name, t in self.marks:
+            parts.append(f"{name}={(t - prev) * 1000:.0f}ms")
+            prev = t
+        total = (prev - self.t0) * 1000
+        print(f"[TIMING] {label} total={total:.0f}ms {' '.join(parts)}", flush=True)
+
+
 class FaceEngine:
     def __init__(self):
         os.makedirs(C.DATA_DIR, exist_ok=True)
         self._lock = threading.Lock()
+
+        # Under a 0.1 vCPU quota there is no real parallelism to gain from
+        # running two inference calls "concurrently" — they just take turns
+        # fighting each other for the same sliver of CPU, which costs more
+        # in scheduling/cache thrash than running them back-to-back. This
+        # lock forces every detect/embed call (across all requests) onto
+        # one at a time, in arrival order.
+        self._infer_lock = threading.Lock()
 
         # Models
         # SCRFD's own preprocessing letterboxes every frame up to `input_size`
@@ -119,6 +158,22 @@ class FaceEngine:
 
         # Cache the flag once
         self._low_ram = bool(getattr(C, "LOW_RAM", True))
+
+        # Pay any one-time ONNX Runtime lazy-init cost (buffer allocation,
+        # kernel selection) now, at startup, instead of on the first real
+        # request.
+        self._warmup()
+
+    def _warmup(self):
+        try:
+            dummy = np.zeros((self._max_side, self._max_side, 3), dtype=np.uint8)
+            self.detector.detect(dummy)
+            self._enhance(dummy.copy())
+            self.recognizer.get_normalized_embedding(
+                np.zeros((112, 112, 3), dtype=np.uint8), None
+            )
+        except Exception:
+            pass
 
     def _ensure_collection(self):
         try:
@@ -308,46 +363,57 @@ class FaceEngine:
         if img is None:
             return 0.0, None, {"reason": "bad_image"}
 
-        # 1. Downscale early
-        img, _ = self._resize_long_side(img)
-        # 2. Enhance (light or full according to LOW_RAM)
-        img = self._enhance(img)
+        lap = _Lap()
+        with self._infer_lock:
+            lap.lap("wait_lock")
+            # 1. Downscale early
+            img, _ = self._resize_long_side(img)
+            lap.lap("resize")
+            # 2. Enhance (light or full according to LOW_RAM)
+            img = self._enhance(img)
+            lap.lap("enhance")
 
-        h, w = img.shape[:2]
-        face = self._largest_face(img)
-        if face is None:
+            h, w = img.shape[:2]
+            face = self._largest_face(img)
+            lap.lap("detect")
+            if face is None:
+                del img
+                lap.report("quality(no_face)")
+                return 0.0, None, {"reason": "no_face"}
+
+            x1, y1, x2, y2 = [float(v) for v in np.asarray(face.bbox, dtype=np.float32).ravel()[:4]]
+            fw = max(x2 - x1, 1.0)
+            fh = max(y2 - y1, 1.0)
+            det = self._safe_score(face)
+
+            area_ratio = (fw * fh) / float(w * h)
+            cx = (x1 + x2) * 0.5
+            cy = (y1 + y2) * 0.5
+            off = max(abs(cx - w * 0.5) / (w * 0.5), abs(cy - h * 0.5) / (h * 0.5))
+
+            # Sharpness (tiny or full according to LOW_RAM)
+            sharp = self._sharpness(img, [x1, y1, x2, y2])
+            lap.lap("sharp")
+
+            s_det = min(max((det - 0.3) / 0.6, 0.0), 1.0)
+            s_size = min(max((area_ratio - C.AREA_MIN) / (0.35 - C.AREA_MIN), 0.0), 1.0)
+            if area_ratio > C.AREA_MAX:
+                s_size *= 0.4
+            s_center = 1.0 - min(off, 1.0)
+            s_sharp = min(sharp / (C.SHARP_MIN * 3.0), 1.0)
+
+            score = 0.35 * s_det + 0.25 * s_sharp + 0.25 * s_size + 0.15 * s_center
+
+            emb = None
+            if score > 0:
+                res = self._embed_from_face(img, face)
+                if res is not None:
+                    emb = res[0]
+            lap.lap("embed")
+
             del img
-            return 0.0, None, {"reason": "no_face"}
 
-        x1, y1, x2, y2 = [float(v) for v in np.asarray(face.bbox, dtype=np.float32).ravel()[:4]]
-        fw = max(x2 - x1, 1.0)
-        fh = max(y2 - y1, 1.0)
-        det = self._safe_score(face)
-
-        area_ratio = (fw * fh) / float(w * h)
-        cx = (x1 + x2) * 0.5
-        cy = (y1 + y2) * 0.5
-        off = max(abs(cx - w * 0.5) / (w * 0.5), abs(cy - h * 0.5) / (h * 0.5))
-
-        # Sharpness (tiny or full according to LOW_RAM)
-        sharp = self._sharpness(img, [x1, y1, x2, y2])
-
-        s_det = min(max((det - 0.3) / 0.6, 0.0), 1.0)
-        s_size = min(max((area_ratio - C.AREA_MIN) / (0.35 - C.AREA_MIN), 0.0), 1.0)
-        if area_ratio > C.AREA_MAX:
-            s_size *= 0.4
-        s_center = 1.0 - min(off, 1.0)
-        s_sharp = min(sharp / (C.SHARP_MIN * 3.0), 1.0)
-
-        score = 0.35 * s_det + 0.25 * s_sharp + 0.25 * s_size + 0.15 * s_center
-
-        emb = None
-        if score > 0:
-            res = self._embed_from_face(img, face)
-            if res is not None:
-                emb = res[0]
-
-        del img
+        lap.report("quality")
         detail = {
             "reason": "ok",
             "score": round(float(score), 3),
@@ -360,33 +426,43 @@ class FaceEngine:
 
     # -------------------------------------------------- live check
     def check_frame(self, buf: bytes):
-        img = self._decode(buf)
-        if img is None:
-            return {"ok": False, "reason": "bad_image"}
+        lap = _Lap()
+        with self._infer_lock:
+            lap.lap("wait_lock")
+            img = self._decode(buf)
+            lap.lap("decode")
+            if img is None:
+                lap.report("check_frame(bad_image)")
+                return {"ok": False, "reason": "bad_image"}
 
-        img, _ = self._resize_long_side(img)
-        h, w = img.shape[:2]
+            img, _ = self._resize_long_side(img)
+            lap.lap("resize")
+            h, w = img.shape[:2]
 
-        face = self._largest_face(img)
-        if face is None:
+            face = self._largest_face(img)
+            lap.lap("detect")
+            if face is None:
+                del img
+                lap.report("check_frame(no_face)")
+                return {"ok": False, "reason": "no_face"}
+
+            x1, y1, x2, y2 = [_f(v) for v in face.bbox]
+            fw, fh = x2 - x1, y2 - y1
+            score = self._safe_score(face)
+
+            area_ratio = (fw * fh) / _f(w * h)
+            cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+            centered = (
+                abs(cx - w * 0.5) < w * C.CENTER_TOL
+                and abs(cy - h * 0.5) < h * C.CENTER_TOL
+            )
+
+            # Sharpness (tiny or full according to LOW_RAM)
+            sharp = self._sharpness(img, [x1, y1, x2, y2])
+            lap.lap("sharp")
             del img
-            return {"ok": False, "reason": "no_face"}
 
-        x1, y1, x2, y2 = [_f(v) for v in face.bbox]
-        fw, fh = x2 - x1, y2 - y1
-        score = self._safe_score(face)
-
-        area_ratio = (fw * fh) / _f(w * h)
-        cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
-        centered = (
-            abs(cx - w * 0.5) < w * C.CENTER_TOL
-            and abs(cy - h * 0.5) < h * C.CENTER_TOL
-        )
-
-        # Sharpness (tiny or full according to LOW_RAM)
-        sharp = self._sharpness(img, [x1, y1, x2, y2])
-        del img
-
+        lap.report("check_frame")
         ok, reason = True, "ok"
         if score < C.DET_SCORE_MIN:
             ok, reason = False, "low_confidence"
@@ -413,11 +489,14 @@ class FaceEngine:
     # -------------------------------------------------- enrollment
     def enroll(self, business_id: str, student_id: str, name: str, frame_bufs: list):
         scored = []
+        t_start = _time.perf_counter()
+        n_processed = 0
 
         for buf in frame_bufs:
             img = self._decode(buf)
             if img is None:
                 continue
+            n_processed += 1
             try:
                 sc, emb, detail = self._quality(img)
             except Exception:
@@ -433,6 +512,13 @@ class FaceEngine:
 
             if len(scored) % 3 == 0:
                 gc.collect()
+
+        if _DEBUG_TIMING:
+            print(
+                f"[TIMING] enroll(scan) total={(_time.perf_counter() - t_start) * 1000:.0f}ms "
+                f"frames_decoded={n_processed} frames_scored={len(scored)}",
+                flush=True,
+            )
 
         if not scored:
             return {
@@ -482,6 +568,7 @@ class FaceEngine:
         del vecs, kept, scored
         gc.collect()
 
+        t_qdrant = _time.perf_counter()
         with self._lock:
             self.client.delete(
                 collection_name=self.collection,
@@ -511,6 +598,8 @@ class FaceEngine:
             self.client.upsert(collection_name=self.collection, points=points)
 
         total = self.client.count(collection_name=self.collection).count
+        if _DEBUG_TIMING:
+            print(f"[TIMING] enroll(qdrant_write+count)={(_time.perf_counter() - t_qdrant) * 1000:.0f}ms", flush=True)
         del all_vecs, points
         gc.collect()
 
@@ -531,15 +620,23 @@ class FaceEngine:
 
     # -------------------------------------------------- recognition
     def _match_single(self, img, business_id=None):
-        img, _ = self._resize_long_side(img)
-        img = self._enhance(img)
-        face = self._largest_face(img)
-        if face is None:
-            del img
-            return None
+        lap = _Lap()
+        with self._infer_lock:
+            lap.lap("wait_lock")
+            img, _ = self._resize_long_side(img)
+            img = self._enhance(img)
+            lap.lap("enhance")
+            face = self._largest_face(img)
+            lap.lap("detect")
+            if face is None:
+                del img
+                lap.report("match_single(no_face)")
+                return None
 
-        res = self._embed_from_face(img, face)
-        del img
+            res = self._embed_from_face(img, face)
+            lap.lap("embed")
+            del img
+        lap.report("match_single(pre-qdrant)")
         if res is None:
             return None
         emb, bbox, _ = res
@@ -550,6 +647,7 @@ class FaceEngine:
                 must=[FieldCondition(key="businessId", match=MatchValue(value=business_id))]
             )
 
+        t_q0 = _time.perf_counter()
         response = self.client.query_points(
             collection_name=self.collection,
             query=emb.ravel().tolist(),
@@ -557,6 +655,8 @@ class FaceEngine:
             limit=C.TOPK,
             score_threshold=C.SIM_THRESHOLD,
         )
+        if _DEBUG_TIMING:
+            print(f"[TIMING] match_single(qdrant_query)={(_time.perf_counter() - t_q0) * 1000:.0f}ms", flush=True)
         hits = response.points
         del emb
 
