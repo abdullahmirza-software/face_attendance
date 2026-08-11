@@ -67,6 +67,11 @@ BURST_MAX_MS = _int("BURST_MAX_MS", 6000)        # safety cap on burst duration 
 SIM_THRESHOLD = _float("SIM_THRESHOLD", 0.62)     # cosine sim to accept a match
 TOPK = _int("TOPK", 5)                             # top-k vectors that vote
 
+
+CAPTURE_MAX_W = _int("CAPTURE_MAX_W", 640)
+CAPTURE_QUALITY = _float("CAPTURE_QUALITY", 0.88)
+
+FACE_CROP_SCALE = _float("FACE_CROP_SCALE", 1.35)
 # ---- server ----
 HOST = _str("HOST", "0.0.0.0")
 PORT = _int("PORT", 8000)

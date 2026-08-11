@@ -12,7 +12,7 @@ const $ = (s) => document.querySelector(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Grab a JPEG blob from a <video> at reduced size (fast uploads, less lag)
-function grabBlob(video, maxW = 480, quality = 0.8) {
+function grabBlob(video, maxW = 640, quality = 0.88) {
   const scale = Math.min(1, maxW / video.videoWidth);
   const c = document.createElement("canvas");
   c.width = Math.round(video.videoWidth * scale);
@@ -257,7 +257,7 @@ async function runCapture() {
     // ---- rapid burst; auto-stops at BURST_TARGET or the safety time cap ----
     for (let i = 0; i < BURST_TARGET; i++) {
       if (!capturing) break;                 // aborted (e.g. mode switch / error)
-      const blob = await grabBlob(enrollVideo, 480, 0.85);
+      const blob = await grabBlob(enrollVideo, window.CAPTURE_MAX_W || 640, window.CAPTURE_QUALITY || 0.88);
       blobs.push(blob);
       const done = i + 1;
       ringCount.textContent = done;
@@ -417,6 +417,9 @@ async function loadConfig() {
     if (c.burstTarget) BURST_TARGET = c.burstTarget;
     if (c.burstKeep) BURST_KEEP = c.burstKeep;
     if (c.burstMaxMs) BURST_MAX_MS = c.burstMaxMs;
+    // optional
+    if (c.captureMaxW) window.CAPTURE_MAX_W = c.captureMaxW;
+    if (c.captureQuality) window.CAPTURE_QUALITY = c.captureQuality;
   } catch (_) {}
 }
 

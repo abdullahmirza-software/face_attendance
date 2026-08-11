@@ -22,7 +22,7 @@ from qdrant_client.http.models import (
 )
 
 from uniface.detection import SCRFD
-from uniface.recognition import MobileFace
+from uniface.recognition import ArcFace
 import config as C
 
 
@@ -41,7 +41,7 @@ class FaceEngine:
 
         # Models
         self.detector = SCRFD(confidence_threshold=C.DET_CONF, providers=C.PROVIDERS)
-        self.recognizer = MobileFace(providers=C.PROVIDERS)
+        self.recognizer = ArcFace(providers=C.PROVIDERS)
 
         # ---------- Embedded Qdrant ----------
         qdrant_path = os.path.join(C.DATA_DIR, "qdrant_data")
@@ -87,13 +87,51 @@ class FaceEngine:
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
     @staticmethod
+    def _crop_face(img, bbox, scale=None):
+        """
+        Tight crop around the face.
+        scale comes from config (FACE_CROP_SCALE).
+        """
+        if scale is None:
+            scale = C.FACE_CROP_SCALE
+
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        size = max(x2 - x1, y2 - y1) * scale
+
+        nx1 = int(max(0, cx - size / 2))
+        ny1 = int(max(0, cy - size / 2))
+        nx2 = int(min(w, cx + size / 2))
+        ny2 = int(min(h, cy + size / 2))
+
+        if nx2 <= nx1 or ny2 <= ny1:
+            return img, (0, 0)
+
+        crop = img[ny1:ny2, nx1:nx2].copy()
+        return crop, (nx1, ny1)
+
+    @staticmethod
     def _enhance(img):
-        """Light denoise + mild sharpen for grainy phone frames"""
         if img is None or img.size == 0:
             return img
-        den = cv2.bilateralFilter(img, d=5, sigmaColor=40, sigmaSpace=40)
-        blur = cv2.GaussianBlur(den, (0, 0), 1.2)
-        sharp = cv2.addWeighted(den, 1.5, blur, -0.5, 0)
+
+        # 1. Stronger CLAHE for lighting changes
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+        # 2. Denoise
+        den = cv2.bilateralFilter(img, d=7, sigmaColor=50, sigmaSpace=50)
+
+        # 3. Mild sharpen
+        blur = cv2.GaussianBlur(den, (0, 0), 1.0)
+        sharp = cv2.addWeighted(den, 1.4, blur, -0.4, 0)
+
         return sharp
 
     def _largest_face(self, img):
@@ -123,42 +161,58 @@ class FaceEngine:
         face = self._largest_face(img)
         if face is None:
             return None
+
         score = self._safe_score(face)
+        bbox = [float(x) for x in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
         lm = getattr(face, "landmarks", None)
+
+        # Tight face crop (removes background)
+        crop, (ox, oy) = self._crop_face(img, bbox)
+
+        if lm is not None:
+            lm = np.asarray(lm, dtype="float32").copy()
+            if lm.ndim == 2 and lm.shape[1] == 2:
+                lm[:, 0] -= ox
+                lm[:, 1] -= oy
+
         try:
-            raw = self.recognizer.get_normalized_embedding(img, lm)
+            raw = self.recognizer.get_normalized_embedding(crop, lm)
         except Exception:
             try:
-                raw = self.recognizer.get_normalized_embedding(img, None)
+                raw = self.recognizer.get_normalized_embedding(crop, None)
             except Exception:
                 return None
+
         emb = np.asarray(raw, dtype="float32").ravel()
         if emb.size != C.EMBED_DIM:
             return None
-        emb = self._l2n(emb)
-        bbox = [_f(x) for x in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
-        return emb, bbox, score
 
+        emb = self._l2n(emb)
+        return emb, bbox, score
     # -------------------------------------------------- quality
     def _quality(self, img):
         if img is None:
             return 0.0, None, {"reason": "bad_image"}
+
         img = self._enhance(img)
         h, w = img.shape[:2]
         face = self._largest_face(img)
         if face is None:
             return 0.0, None, {"reason": "no_face"}
 
-        x1, y1, x2, y2 = [_f(v) for v in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
+        x1, y1, x2, y2 = [float(v) for v in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
         fw, fh = max(x2 - x1, 1.0), max(y2 - y1, 1.0)
         det = self._safe_score(face)
 
-        area_ratio = (fw * fh) / _f(w * h)
+        area_ratio = (fw * fh) / float(w * h)
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         off = max(abs(cx - w / 2) / (w / 2), abs(cy - h / 2) / (h / 2))
-        crop = img[max(0, int(y1)):int(y2), max(0, int(x1)):int(x2)]
-        sharp = _f(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size else 0.0
 
+        # Use cropped face for sharpness (more accurate)
+        crop, _ = self._crop_face(img, [x1, y1, x2, y2])
+        sharp = float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size else 0.0
+
+        # sub-scores
         s_det = min(max((det - 0.3) / 0.6, 0.0), 1.0)
         s_size = min(max((area_ratio - C.AREA_MIN) / (0.35 - C.AREA_MIN), 0.0), 1.0)
         if area_ratio > C.AREA_MAX:
@@ -171,7 +225,16 @@ class FaceEngine:
         emb = None
         if score > 0:
             try:
-                raw = self.recognizer.get_normalized_embedding(img, getattr(face, "landmarks", None))
+                # Also compute embedding on the cropped face
+                lm = getattr(face, "landmarks", None)
+                crop_emb, (ox, oy) = self._crop_face(img, [x1, y1, x2, y2])
+                if lm is not None:
+                    lm = np.asarray(lm, dtype="float32").copy()
+                    if lm.ndim == 2 and lm.shape[1] == 2:
+                        lm[:, 0] -= ox
+                        lm[:, 1] -= oy
+
+                raw = self.recognizer.get_normalized_embedding(crop_emb, lm)
                 e = np.asarray(raw, dtype="float32").ravel()
                 if e.size == C.EMBED_DIM:
                     emb = self._l2n(e)
@@ -180,13 +243,13 @@ class FaceEngine:
 
         detail = {
             "reason": "ok",
-            "score": round(_f(score), 3),
+            "score": round(float(score), 3),
             "det": round(det, 3),
             "sharpness": round(sharp, 1),
             "area_ratio": round(area_ratio, 3),
-            "off_center": round(_f(off), 3),
+            "off_center": round(float(off), 3),
         }
-        return _f(score), emb, detail
+        return float(score), emb, detail
 
     # -------------------------------------------------- check frame
     def check_frame(self, buf: bytes):

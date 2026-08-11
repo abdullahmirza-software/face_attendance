@@ -1,42 +1,10 @@
 [
   {
-    "businessId": null,
-    "studentId": "b72d68e0-6a3d-4b70-9169-ffc321c9281a",
-    "name": "Test",
-    "probability": 0.9452,
-    "avg_score": 0.8904,
-    "loginTime": "2026-08-11T00:11:17"
-  },
-  {
-    "businessId": null,
-    "studentId": "b72d68e0-6a3d-4b70-9169-ffc321c9281a",
-    "name": "Test",
-    "probability": 0.9352,
-    "avg_score": 0.8704,
-    "loginTime": "2026-08-11T00:12:48"
-  },
-  {
     "businessId": "8be64844-3f08-4b2b-9d81-310e218180d7",
     "studentId": "b72d68e0-6a3d-4b70-9169-ffc321c9281a",
-    "name": "Test",
-    "probability": 0.9141,
-    "avg_score": 0.8282,
-    "loginTime": "2026-08-11T00:19:53"
-  },
-  {
-    "businessId": "8be64844-3f08-4b2b-9d81-310e218180d7",
-    "studentId": "b72d68e0-6a3d-4b70-9169-ffc321c9281a",
-    "name": "Test",
-    "probability": 0.8874,
-    "avg_score": 0.7749,
-    "loginTime": "2026-08-11T00:44:52"
-  },
-  {
-    "businessId": "8be64844-3f08-4b2b-9d81-310e218180d7",
-    "studentId": "87dad78e-dc12-4f9f-bf67-2d3607e9dcce",
-    "name": "Test 2",
-    "probability": 0.8531,
-    "avg_score": 0.7063,
-    "loginTime": "2026-08-11T00:50:05"
+    "name": "M Abdullah Tahir",
+    "probability": 0.9582,
+    "avg_score": 0.9165,
+    "loginTime": "2026-08-11T16:56:19"
   }
 ]

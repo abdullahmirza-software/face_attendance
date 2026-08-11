@@ -107,6 +107,8 @@ async def client_config():
         "burstKeep": C.BURST_KEEP,
         "burstMaxMs": C.BURST_MAX_MS,
         "enrollAccept": C.ENROLL_ACCEPT,
+        "captureMaxW": C.CAPTURE_MAX_W,
+        "captureQuality": C.CAPTURE_QUALITY,
     })
 
 
