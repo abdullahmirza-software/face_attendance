@@ -66,12 +66,12 @@ class FaceEngine:
                     size=C.EMBED_DIM,
                     distance=Distance.COSINE,
                 ),
-                optimizers_config=OptimizersConfigDiff(
-                    # Free tier only has 0.5 vCPU → keep background work minimal
-                    max_optimization_threads=C.MAX_OPTIMIZATION_THREADS,  # 1 or 2 threads is enough
-                    # Don’t start indexing until we have a decent number of points
-                    indexing_threshold=C.INDEXING_THRESHOLD,   # ~20k points (adjust if needed)
-                ),
+                # optimizers_config=OptimizersConfigDiff(
+                #     # Free tier only has 0.5 vCPU → keep background work minimal
+                #     max_optimization_threads=C.MAX_OPTIMIZATION_THREADS,  # 1 or 2 threads is enough
+                #     # Don’t start indexing until we have a decent number of points
+                #     indexing_threshold=C.INDEXING_THRESHOLD,   # ~20k points (adjust if needed)
+                # ),
             )
 
             # Payload indexes are still useful and cheap
