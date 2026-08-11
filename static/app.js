@@ -1,34 +1,49 @@
 /* ------------------------------------------------------------------
-   Sentry face attendance — frontend logic
-   - two modes: verify (check-in) and enroll (register from webcam video)
-   - phone-style live guidance during enrollment via /api/check-frame
-   - captures diverse frames, posts to FastAPI, renders result + probability
+   Sentry face attendance — frontend (optimized)
+   Respects LOW_RAM from /api/config
 ------------------------------------------------------------------ */
 
-const API = "";  // same origin
+const API = "";
 
-// ---- tiny helpers ----
+// ---- helpers ----
 const $ = (s) => document.querySelector(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Grab a JPEG blob from a <video> at reduced size (fast uploads, less lag)
-function grabBlob(video, maxW = 640, quality = 0.88) {
-  const scale = Math.min(1, maxW / video.videoWidth);
-  const c = document.createElement("canvas");
-  c.width = Math.round(video.videoWidth * scale);
-  c.height = Math.round(video.videoHeight * scale);
-  const ctx = c.getContext("2d");
-  ctx.drawImage(video, 0, 0, c.width, c.height);
-  return new Promise((res) => c.toBlob((b) => res(b), "image/jpeg", quality));
+// Reuse one canvas (big win — no alloc every frame)
+const _canvas = document.createElement("canvas");
+const _ctx = _canvas.getContext("2d", { alpha: false });
+
+function grabBlob(video, maxW = 640, quality = 0.75) {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const scale = Math.min(1, maxW / vw);
+  const w = Math.round(vw * scale);
+  const h = Math.round(vh * scale);
+
+  if (_canvas.width !== w || _canvas.height !== h) {
+    _canvas.width = w;
+    _canvas.height = h;
+  }
+  _ctx.drawImage(video, 0, 0, w, h);
+  return new Promise((res) =>
+    _canvas.toBlob((b) => res(b), "image/jpeg", quality)
+  );
 }
 
-// ---- camera manager (one shared stream, attached per active view) ----
+// ---- camera ----
 const cam = {
   stream: null,
   async start(videoEl) {
     if (!this.stream) {
+      // Lower ideal resolution on low-RAM mode
+      const idealW = window.LOW_RAM ? 560 : 720;
+      const idealH = window.LOW_RAM ? 720 : 960;
       this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 720 }, height: { ideal: 960 }, facingMode: "user" },
+        video: {
+          width: { ideal: idealW },
+          height: { ideal: idealH },
+          facingMode: "user",
+        },
         audio: false,
       });
     }
@@ -50,8 +65,12 @@ document.querySelectorAll(".mode-btn").forEach((btn) => {
     currentMode = btn.dataset.mode;
     views.verify.classList.toggle("d-none", currentMode !== "verify");
     views.enroll.classList.toggle("d-none", currentMode !== "enroll");
-    if (currentMode === "verify") { abortCapture(); await cam.start($("#verifyVideo")); }
-    else await cam.start($("#enrollVideo"));
+    if (currentMode === "verify") {
+      abortCapture();
+      await cam.start($("#verifyVideo"));
+    } else {
+      await cam.start($("#enrollVideo"));
+    }
   });
 });
 
@@ -79,22 +98,22 @@ verifyBtn.addEventListener("click", async () => {
   verifyHint.textContent = "Scanning…";
 
   try {
-    // capture a few frames over ~0.7s for a robust vote
+    // Fewer frames + lower quality when LOW_RAM
+    const nFrames = window.LOW_RAM ? 3 : 4;
+    const maxW = window.CAPTURE_MAX_W || (window.LOW_RAM ? 512 : 640);
+    const quality = window.CAPTURE_QUALITY || (window.LOW_RAM ? 0.70 : 0.80);
+
     const blobs = [];
-    for (let i = 0; i < 4; i++) {
-      blobs.push(await grabBlob(verifyVideo));
-      await sleep(160);
+    for (let i = 0; i < nFrames; i++) {
+      blobs.push(await grabBlob(verifyVideo, maxW, quality));
+      await sleep(window.LOW_RAM ? 120 : 150);
     }
 
     const fd = new FormData();
     blobs.forEach((b, i) => fd.append("frames", b, `f${i}.jpg`));
 
-    // ---------- NEW: send businessId if filled ----------
     const businessId = $("#verifyBusiness")?.value.trim();
-    if (businessId) {
-      fd.append("businessId", businessId);
-    }
-    // ----------------------------------------------------
+    if (businessId) fd.append("businessId", businessId);
 
     const res = await fetch(`${API}/api/verify`, { method: "POST", body: fd });
     const data = await res.json();
@@ -136,6 +155,7 @@ function renderVerifyResult(d) {
       </div>`;
   }
 }
+
 function renderVerifyError() {
   $("#verifyResult").innerHTML = `
     <div class="res"><span class="res-badge no"><i class="bi bi-wifi-off"></i> Request failed</span>
@@ -152,16 +172,16 @@ const enrollFrame = $("#enrollFrame");
 const captureRing = $("#captureRing");
 const ringFg = $("#ringFg");
 const ringCount = $("#ringCount");
-const quality = $("#enrollQuality");
+const qualityEl = $("#enrollQuality");
 
-// burst capture config (mirrors server .env defaults; server is source of truth)
-let BURST_TARGET = 20;   // frames to record
-let BURST_KEEP = 8;
-let BURST_MAX_MS = 6000; // safety time cap
-const RING_CIRCUM = 339;       // 2*pi*54
+let BURST_TARGET = 18;
+let BURST_KEEP = 4;
+let BURST_MAX_MS = 7000;
+const RING_CIRCUM = 339;
 
 let liveTimer = null;
 let formOK = false;
+let capturing = false;
 
 function validateForm() {
   formOK =
@@ -176,7 +196,6 @@ function validateForm() {
   $("#" + id).addEventListener("input", validateForm)
 );
 
-// UUID generator (browser-native, with fallback)
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -189,14 +208,8 @@ $("#genStudent").addEventListener("click", () => {
   validateForm();
 });
 
-// Live quality feedback loop (throttled) — phone-style guidance
-// Live guidance is driven from inside the capture burst (see runCapture).
-// This is intentionally NOT on a background timer, so check-frame is never
-// called while idle. Kept as a no-op to avoid touching other references.
-async function liveGuide() { /* disabled: burst-driven guidance only */ }
-
 function paintQuality(q) {
-  quality.hidden = false;
+  qualityEl.hidden = false;
   const face = $("#qFace"), dist = $("#qDist"), sharp = $("#qSharp");
   const msg = {
     no_face: ["No face", "bad"], low_confidence: ["Weak", "bad"],
@@ -222,8 +235,6 @@ async function initEnroll() {
   try {
     await cam.start(enrollVideo);
     validateForm();
-    // NOTE: no live-guide polling here. check-frame is only called while a
-    // capture is running, so the network stays idle until you press Start.
     stopLiveGuide();
     enrollHint.textContent = formOK ? "Ready — press Start capture" : "Fill in details to begin";
   } catch (e) {
@@ -237,8 +248,6 @@ function stopLiveGuide() {
 
 enrollBtn.addEventListener("click", runCapture);
 
-let capturing = false;
-
 async function runCapture() {
   if (!formOK || capturing) return;
   capturing = true;
@@ -248,23 +257,27 @@ async function runCapture() {
   $("#enrollResult").innerHTML = "";
   enrollHint.className = "cam-hint";
   enrollHint.textContent = "Recording… slowly turn your head";
-  stopLiveGuide(); // ensure no duplicate polling
+  stopLiveGuide();
+
+  const maxW = window.CAPTURE_MAX_W || (window.LOW_RAM ? 512 : 640);
+  const quality = window.CAPTURE_QUALITY || (window.LOW_RAM ? 0.70 : 0.80);
+  const guideEvery = window.LOW_RAM ? 5 : 4;   // fewer check-frame calls
 
   const blobs = [];
   const started = performance.now();
 
   try {
-    // ---- rapid burst; auto-stops at BURST_TARGET or the safety time cap ----
     for (let i = 0; i < BURST_TARGET; i++) {
-      if (!capturing) break;                 // aborted (e.g. mode switch / error)
-      const blob = await grabBlob(enrollVideo, window.CAPTURE_MAX_W || 640, window.CAPTURE_QUALITY || 0.88);
+      if (!capturing) break;
+      const blob = await grabBlob(enrollVideo, maxW, quality);
       blobs.push(blob);
+
       const done = i + 1;
       ringCount.textContent = done;
       ringFg.style.strokeDashoffset = RING_CIRCUM * (1 - done / BURST_TARGET);
 
-      // live guidance during recording only: reuse this frame, ~every 4th, fire-and-forget
-      if (i % 4 === 0) {
+      // Live guidance — only every N frames, fire-and-forget
+      if (i % guideEvery === 0) {
         const qfd = new FormData();
         qfd.append("frame", blob, "q.jpg");
         fetch(`${API}/api/check-frame`, { method: "POST", body: qfd })
@@ -272,11 +285,11 @@ async function runCapture() {
           .then((q) => { if (capturing) paintQuality(q); })
           .catch(() => {});
       }
-      await sleep(40);
+
+      await sleep(window.LOW_RAM ? 50 : 40);
       if (performance.now() - started > BURST_MAX_MS) break;
     }
 
-    // ---- auto-stop recording, then process the whole burst at once ----
     enrollFrame.classList.remove("scanning");
     enrollHint.textContent = "Selecting best shots…";
 
@@ -288,7 +301,6 @@ async function runCapture() {
 
     const res = await fetch(`${API}/api/enroll`, { method: "POST", body: fd });
     if (!res.ok && res.status >= 500) {
-      // server error -> stop cleanly, surface it
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `server ${res.status}`);
     }
@@ -296,7 +308,6 @@ async function runCapture() {
     renderEnrollResult(data);
     loadStudents();
   } catch (e) {
-    // ANY failure: stop recording + detecting immediately, show a clear message
     abortCapture();
     $("#enrollResult").innerHTML = errBox(
       "Capture stopped — " + (e && e.message ? e.message : "something went wrong") + ". Press Start to try again."
@@ -308,11 +319,10 @@ async function runCapture() {
     enrollFrame.classList.remove("scanning");
     enrollBtn.disabled = false;
     capturing = false;
-    stopLiveGuide(); // idle again — no background check-frame calls
+    stopLiveGuide();
   }
 }
 
-// Hard stop: kills the burst loop and any polling. Used on error / mode change.
 function abortCapture() {
   capturing = false;
   stopLiveGuide();
@@ -333,7 +343,7 @@ function renderEnrollResult(d) {
         <div class="meter-row"><span>Angles stored</span><b>${d.angles_used}</b></div>
         <div class="meter-row"><span>Best frame score</span><b>${Math.round(d.best_score*100)}%</b></div>
         ${scores ? `<div class="meter-row"><span>Kept scores</span><b style="font-size:12px">${scores}</b></div>` : ""}
-        <div class="meter-row"><span>Vectors in FAISS</span><b>${d.vectors}</b></div>
+        <div class="meter-row"><span>Vectors stored</span><b>${d.vectors}</b></div>
       </div>`;
   } else if (d.reason === "below_threshold") {
     box.innerHTML = errBox(
@@ -417,16 +427,18 @@ async function loadConfig() {
     if (c.burstTarget) BURST_TARGET = c.burstTarget;
     if (c.burstKeep) BURST_KEEP = c.burstKeep;
     if (c.burstMaxMs) BURST_MAX_MS = c.burstMaxMs;
-    // optional
     if (c.captureMaxW) window.CAPTURE_MAX_W = c.captureMaxW;
     if (c.captureQuality) window.CAPTURE_QUALITY = c.captureQuality;
-  } catch (_) {}
+    if (typeof c.lowRam === "boolean") window.LOW_RAM = c.lowRam;
+  } catch (_) {
+    window.LOW_RAM = true; // safe default
+  }
 }
 
 (async function boot() {
   await loadConfig();
   await initVerify();
-  await initEnroll();  // sets up live-guide loop; only fires while enroll view active
+  await initEnroll();
   loadStudents();
   loadLogins();
 })();

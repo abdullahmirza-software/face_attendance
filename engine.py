@@ -1,10 +1,12 @@
 """
-engine.py — face logic with Qdrant (embedded mode)
-Uses: QdrantClient(path="./qdrant_data")
+engine.py — memory-optimized for Render free (512 MB) + Qdrant free tier
+Quality controlled by LOW_RAM flag:
+  LOW_RAM=true  → light enhance + tiny sharpness (saves RAM)
+  LOW_RAM=false → original full enhance + full sharpness
 """
 
 import os
-import json
+import gc
 import threading
 import uuid
 import numpy as np
@@ -19,14 +21,13 @@ from qdrant_client.http.models import (
     Filter,
     FieldCondition,
     MatchValue,
-    OptimizersConfigDiff
+    OptimizersConfigDiff,
 )
 from uniface.detection import SCRFD
 from uniface.recognition import ArcFace
 import config as C
 
 
-# -------- helpers --------
 def _f(x):
     return float(x)
 
@@ -43,11 +44,13 @@ class FaceEngine:
         self.detector = SCRFD(confidence_threshold=C.DET_CONF, providers=C.PROVIDERS)
         self.recognizer = ArcFace(providers=C.PROVIDERS)
 
-        # ---------- Embedded Qdrant ----------
-        if C.QDRANT_URL and C.QDRANT_API_KEY:
-            self.client =  QdrantClient(
+        # Qdrant (cloud free tier or local)
+        if getattr(C, "QDRANT_URL", None) and getattr(C, "QDRANT_API_KEY", None):
+            self.client = QdrantClient(
                 url=C.QDRANT_URL,
-                api_key=C.QDRANT_API_KEY
+                api_key=C.QDRANT_API_KEY,
+                prefer_grpc=False,
+                timeout=30,
             )
         else:
             qdrant_path = os.path.join(C.DATA_DIR, "qdrant_data")
@@ -56,96 +59,145 @@ class FaceEngine:
         self.collection = "faces"
         self._ensure_collection()
 
+        # Reuse one CLAHE instance
+        self._clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+
+        # Max long-side size before detection
+        self._max_side = getattr(C, "MAX_SIDE", 640)
+
+        # Cache the flag once
+        self._low_ram = bool(getattr(C, "LOW_RAM", True))
 
     def _ensure_collection(self):
-        collections = [c.name for c in self.client.get_collections().collections]
-        if self.collection not in collections:
-            self.client.create_collection(
-                collection_name=self.collection,
-                vectors_config=VectorParams(
-                    size=C.EMBED_DIM,
-                    distance=Distance.COSINE,
-                ),
-                # optimizers_config=OptimizersConfigDiff(
-                #     # Free tier only has 0.5 vCPU → keep background work minimal
-                #     max_optimization_threads=C.MAX_OPTIMIZATION_THREADS,  # 1 or 2 threads is enough
-                #     # Don’t start indexing until we have a decent number of points
-                #     indexing_threshold=C.INDEXING_THRESHOLD,   # ~20k points (adjust if needed)
-                # ),
-            )
+        try:
+            names = {c.name for c in self.client.get_collections().collections}
+        except Exception:
+            names = set()
+        if self.collection in names:
+            return
 
-            # Payload indexes are still useful and cheap
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="businessId",
-                field_schema="keyword",
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="studentId",
-                field_schema="keyword",
-            )
+        self.client.create_collection(
+            collection_name=self.collection,
+            vectors_config=VectorParams(
+                size=C.EMBED_DIM,
+                distance=Distance.COSINE,
+            ),
+            optimizers_config=OptimizersConfigDiff(
+                max_optimization_threads=getattr(C, "MAX_OPTIMIZATION_THREADS", 1),
+                indexing_threshold=getattr(C, "INDEXING_THRESHOLD", 20000),
+            ),
+        )
+
+        for field in ("businessId", "studentId"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field,
+                    field_schema="keyword",
+                )
+            except Exception:
+                pass
+
     # -------------------------------------------------- helpers
     @staticmethod
     def _l2n(v):
-        v = np.asarray(v, dtype="float32")
+        v = np.asarray(v, dtype=np.float32)
         if v.ndim == 1:
             v = v[None, :]
-        norm = np.linalg.norm(v, axis=1, keepdims=True)
-        norm = np.maximum(norm, 1e-10)
-        return v / norm
+        n = np.linalg.norm(v, axis=1, keepdims=True)
+        n = np.maximum(n, 1e-10)
+        return (v / n).astype(np.float32)
 
     @staticmethod
     def _decode(buf: bytes):
         arr = np.frombuffer(buf, np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        del arr
+        return img
+
+    def _resize_long_side(self, img, max_side=None):
+        if max_side is None:
+            max_side = self._max_side
+        h, w = img.shape[:2]
+        side = max(h, w)
+        if side <= max_side:
+            return img, 1.0
+        scale = max_side / float(side)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        out = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return out, scale
 
     @staticmethod
     def _crop_face(img, bbox, scale=None):
-        """
-        Tight crop around the face.
-        scale comes from config (FACE_CROP_SCALE).
-        """
         if scale is None:
             scale = C.FACE_CROP_SCALE
-
         h, w = img.shape[:2]
-        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
+        x1, y1, x2, y2 = map(float, bbox[:4])
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
         size = max(x2 - x1, y2 - y1) * scale
-
-        nx1 = int(max(0, cx - size / 2))
-        ny1 = int(max(0, cy - size / 2))
-        nx2 = int(min(w, cx + size / 2))
-        ny2 = int(min(h, cy + size / 2))
-
+        half = size * 0.5
+        nx1 = max(0, int(cx - half))
+        ny1 = max(0, int(cy - half))
+        nx2 = min(w, int(cx + half))
+        ny2 = min(h, int(cy + half))
         if nx2 <= nx1 or ny2 <= ny1:
             return img, (0, 0)
+        return img[ny1:ny2, nx1:nx2].copy(), (nx1, ny1)
 
-        crop = img[ny1:ny2, nx1:nx2].copy()
-        return crop, (nx1, ny1)
-
-    @staticmethod
-    def _enhance(img):
+    def _enhance(self, img):
+        """
+        LOW_RAM=true  → light CLAHE + mild unsharp
+        LOW_RAM=false → original strong pipeline (CLAHE + bilateral + sharpen)
+        """
         if img is None or img.size == 0:
             return img
 
-        # 1. Stronger CLAHE for lighting changes
+        # Common: CLAHE
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
+        l = self._clahe.apply(l)
         img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        del lab, l, a, b
 
-        # 2. Denoise
-        den = cv2.bilateralFilter(img, d=7, sigmaColor=50, sigmaSpace=50)
+        if self._low_ram:
+            # Light path (saves RAM)
+            blur = cv2.GaussianBlur(img, (0, 0), 0.8)
+            sharp = cv2.addWeighted(img, 1.25, blur, -0.25, 0)
+            del blur
+            return sharp
+        else:
+            # Original-quality path
+            den = cv2.bilateralFilter(img, d=7, sigmaColor=50, sigmaSpace=50)
+            blur = cv2.GaussianBlur(den, (0, 0), 1.0)
+            sharp = cv2.addWeighted(den, 1.4, blur, -0.4, 0)
+            del den, blur
+            return sharp
 
-        # 3. Mild sharpen
-        blur = cv2.GaussianBlur(den, (0, 0), 1.0)
-        sharp = cv2.addWeighted(den, 1.4, blur, -0.4, 0)
+    def _sharpness(self, img, bbox):
+        """
+        LOW_RAM=true  → tiny 48×48 patch
+        LOW_RAM=false → full crop (original behaviour)
+        """
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        y1i, y2i = max(0, int(y1)), min(h, int(y2))
+        x1i, x2i = max(0, int(x1)), min(w, int(x2))
+        patch = img[y1i:y2i, x1i:x2i]
 
+        if not patch.size:
+            return 0.0
+
+        if self._low_ram:
+            small = cv2.resize(patch, (48, 48), interpolation=cv2.INTER_AREA)
+            sharp = float(cv2.Laplacian(small, cv2.CV_64F).var())
+            del small
+        else:
+            # Full crop sharpness (same as original)
+            sharp = float(cv2.Laplacian(patch, cv2.CV_64F).var())
+
+        del patch
         return sharp
 
     def _largest_face(self, img):
@@ -165,26 +217,21 @@ class FaceEngine:
         if val is None:
             return 1.0
         try:
-            arr = np.asarray(val, dtype="float32").ravel()
+            arr = np.asarray(val, dtype=np.float32).ravel()
             return float(arr[0]) if arr.size else 1.0
         except Exception:
             return 1.0
 
-    def _embed(self, img):
-        img = self._enhance(img)
-        face = self._largest_face(img)
-        if face is None:
-            return None
-
+    def _embed_from_face(self, img, face):
+        """Embedding from already-detected face. No second detection."""
+        bbox = [float(x) for x in np.asarray(face.bbox, dtype=np.float32).ravel()[:4]]
         score = self._safe_score(face)
-        bbox = [float(x) for x in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
         lm = getattr(face, "landmarks", None)
 
-        # Tight face crop (removes background)
         crop, (ox, oy) = self._crop_face(img, bbox)
 
         if lm is not None:
-            lm = np.asarray(lm, dtype="float32").copy()
+            lm = np.asarray(lm, dtype=np.float32).copy()
             if lm.ndim == 2 and lm.shape[1] == 2:
                 lm[:, 0] -= ox
                 lm[:, 1] -= oy
@@ -195,38 +242,44 @@ class FaceEngine:
             try:
                 raw = self.recognizer.get_normalized_embedding(crop, None)
             except Exception:
+                del crop
                 return None
 
-        emb = np.asarray(raw, dtype="float32").ravel()
+        emb = np.asarray(raw, dtype=np.float32).ravel()
+        del crop, raw
         if emb.size != C.EMBED_DIM:
             return None
+        return self._l2n(emb), bbox, score
 
-        emb = self._l2n(emb)
-        return emb, bbox, score
-    # -------------------------------------------------- quality
+    # -------------------------------------------------- quality (enrollment)
     def _quality(self, img):
         if img is None:
             return 0.0, None, {"reason": "bad_image"}
 
+        # 1. Downscale early
+        img, _ = self._resize_long_side(img)
+        # 2. Enhance (light or full according to LOW_RAM)
         img = self._enhance(img)
+
         h, w = img.shape[:2]
         face = self._largest_face(img)
         if face is None:
+            del img
             return 0.0, None, {"reason": "no_face"}
 
-        x1, y1, x2, y2 = [float(v) for v in np.asarray(face.bbox, dtype="float32").ravel()[:4]]
-        fw, fh = max(x2 - x1, 1.0), max(y2 - y1, 1.0)
+        x1, y1, x2, y2 = [float(v) for v in np.asarray(face.bbox, dtype=np.float32).ravel()[:4]]
+        fw = max(x2 - x1, 1.0)
+        fh = max(y2 - y1, 1.0)
         det = self._safe_score(face)
 
         area_ratio = (fw * fh) / float(w * h)
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        off = max(abs(cx - w / 2) / (w / 2), abs(cy - h / 2) / (h / 2))
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        off = max(abs(cx - w * 0.5) / (w * 0.5), abs(cy - h * 0.5) / (h * 0.5))
 
-        # Use cropped face for sharpness (more accurate)
-        crop, _ = self._crop_face(img, [x1, y1, x2, y2])
-        sharp = float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size else 0.0
+        # Sharpness (tiny or full according to LOW_RAM)
+        sharp = self._sharpness(img, [x1, y1, x2, y2])
 
-        # sub-scores
         s_det = min(max((det - 0.3) / 0.6, 0.0), 1.0)
         s_size = min(max((area_ratio - C.AREA_MIN) / (0.35 - C.AREA_MIN), 0.0), 1.0)
         if area_ratio > C.AREA_MAX:
@@ -238,23 +291,11 @@ class FaceEngine:
 
         emb = None
         if score > 0:
-            try:
-                # Also compute embedding on the cropped face
-                lm = getattr(face, "landmarks", None)
-                crop_emb, (ox, oy) = self._crop_face(img, [x1, y1, x2, y2])
-                if lm is not None:
-                    lm = np.asarray(lm, dtype="float32").copy()
-                    if lm.ndim == 2 and lm.shape[1] == 2:
-                        lm[:, 0] -= ox
-                        lm[:, 1] -= oy
+            res = self._embed_from_face(img, face)
+            if res is not None:
+                emb = res[0]
 
-                raw = self.recognizer.get_normalized_embedding(crop_emb, lm)
-                e = np.asarray(raw, dtype="float32").ravel()
-                if e.size == C.EMBED_DIM:
-                    emb = self._l2n(e)
-            except Exception:
-                emb = None
-
+        del img
         detail = {
             "reason": "ok",
             "score": round(float(score), 3),
@@ -265,16 +306,18 @@ class FaceEngine:
         }
         return float(score), emb, detail
 
-    # -------------------------------------------------- check frame
+    # -------------------------------------------------- live check
     def check_frame(self, buf: bytes):
         img = self._decode(buf)
         if img is None:
             return {"ok": False, "reason": "bad_image"}
-        img = self._enhance(img)
+
+        img, _ = self._resize_long_side(img)
         h, w = img.shape[:2]
 
         face = self._largest_face(img)
         if face is None:
+            del img
             return {"ok": False, "reason": "no_face"}
 
         x1, y1, x2, y2 = [_f(v) for v in face.bbox]
@@ -282,10 +325,15 @@ class FaceEngine:
         score = self._safe_score(face)
 
         area_ratio = (fw * fh) / _f(w * h)
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        centered = abs(cx - w / 2) < w * C.CENTER_TOL and abs(cy - h / 2) < h * C.CENTER_TOL
-        crop = img[max(0, int(y1)):int(y2), max(0, int(x1)):int(x2)]
-        sharp = _f(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size else 0.0
+        cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+        centered = (
+            abs(cx - w * 0.5) < w * C.CENTER_TOL
+            and abs(cy - h * 0.5) < h * C.CENTER_TOL
+        )
+
+        # Sharpness (tiny or full according to LOW_RAM)
+        sharp = self._sharpness(img, [x1, y1, x2, y2])
+        del img
 
         ok, reason = True, "ok"
         if score < C.DET_SCORE_MIN:
@@ -313,15 +361,26 @@ class FaceEngine:
     # -------------------------------------------------- enrollment
     def enroll(self, business_id: str, student_id: str, name: str, frame_bufs: list):
         scored = []
+
         for buf in frame_bufs:
             img = self._decode(buf)
+            if img is None:
+                continue
             try:
                 sc, emb, detail = self._quality(img)
             except Exception:
-                continue
+                emb = None
+            del img
             if emb is None:
                 continue
             scored.append((sc, emb, detail))
+
+            # Early stop
+            if len(scored) >= getattr(C, "BURST_KEEP", 5) * 2:
+                break
+
+            if len(scored) % 3 == 0:
+                gc.collect()
 
         if not scored:
             return {
@@ -351,8 +410,8 @@ class FaceEngine:
             if len(kept) >= C.BURST_KEEP:
                 break
             if kept:
-                sims = (np.vstack(kept) @ emb.T).ravel()
-                if _f(sims.max()) > C.MIN_DIVERSITY:
+                sims = np.dot(np.vstack(kept), emb.ravel())
+                if float(sims.max()) > C.MIN_DIVERSITY:
                     continue
             kept.append(emb)
             kept_details.append(detail)
@@ -367,10 +426,11 @@ class FaceEngine:
 
         vecs = np.vstack(kept)
         centroid = self._l2n(vecs.mean(axis=0))
-        all_vecs = np.vstack([vecs, centroid]).astype("float32")
+        all_vecs = np.vstack([vecs, centroid]).astype(np.float32)
+        del vecs, kept, scored
+        gc.collect()
 
         with self._lock:
-            # Delete old vectors of this student
             self.client.delete(
                 collection_name=self.collection,
                 points_selector=rest.FilterSelector(
@@ -383,32 +443,32 @@ class FaceEngine:
                 ),
             )
 
-            # Insert new vectors
-            points = []
-            for i, vec in enumerate(all_vecs):
-                points.append(
-                    PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=vec.tolist(),
-                        payload={
-                            "businessId": business_id,
-                            "studentId": student_id,
-                            "name": name,
-                            "is_centroid": i == len(all_vecs) - 1,
-                        },
-                    )
+            points = [
+                PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=v.tolist(),
+                    payload={
+                        "businessId": business_id,
+                        "studentId": student_id,
+                        "name": name,
+                        "is_centroid": i == len(all_vecs) - 1,
+                    },
                 )
+                for i, v in enumerate(all_vecs)
+            ]
             self.client.upsert(collection_name=self.collection, points=points)
 
         total = self.client.count(collection_name=self.collection).count
+        del all_vecs, points
+        gc.collect()
 
         return {
             "ok": True,
             "name": name,
             "studentId": student_id,
             "businessId": business_id,
-            "vectors": _i(len(all_vecs)),
-            "angles_used": _i(len(kept)),
+            "vectors": _i(len(kept_details) + 1),
+            "angles_used": _i(len(kept_details)),
             "received": _i(len(frame_bufs)),
             "accepted": _i(len(accepted)),
             "best_score": round(best_score, 3),
@@ -419,7 +479,15 @@ class FaceEngine:
 
     # -------------------------------------------------- recognition
     def _match_single(self, img, business_id=None):
-        res = self._embed(img)
+        img, _ = self._resize_long_side(img)
+        img = self._enhance(img)
+        face = self._largest_face(img)
+        if face is None:
+            del img
+            return None
+
+        res = self._embed_from_face(img, face)
+        del img
         if res is None:
             return None
         emb, bbox, _ = res
@@ -430,25 +498,25 @@ class FaceEngine:
                 must=[FieldCondition(key="businessId", match=MatchValue(value=business_id))]
             )
 
-        # New correct method for latest qdrant-client
         response = self.client.query_points(
             collection_name=self.collection,
-            query=emb[0].tolist() if emb.ndim > 1 else emb.tolist(),
+            query=emb.ravel().tolist(),
             query_filter=query_filter,
             limit=C.TOPK,
             score_threshold=C.SIM_THRESHOLD,
         )
         hits = response.points
+        del emb
 
         if not hits:
             return {"matched": False, "bbox": bbox}
 
         votes = {}
         for hit in hits:
-            payload = hit.payload
-            sid = payload["studentId"]
+            p = hit.payload
+            sid = p["studentId"]
             if sid not in votes:
-                votes[sid] = [0.0, 0, payload["name"], payload["businessId"]]
+                votes[sid] = [0.0, 0, p["name"], p["businessId"]]
             votes[sid][0] += float(hit.score)
             votes[sid][1] += 1
 
@@ -465,11 +533,20 @@ class FaceEngine:
 
     def recognize(self, frame_bufs: list, business_id=None):
         per_frame = []
-        for buf in frame_bufs:
+        for i, buf in enumerate(frame_bufs):
             img = self._decode(buf)
             if img is None:
                 continue
-            per_frame.append(self._match_single(img, business_id))
+            m = self._match_single(img, business_id)
+            del img
+            per_frame.append(m)
+
+            hits_so_far = sum(1 for r in per_frame if r and r.get("matched"))
+            if hits_so_far >= max(2, (len(frame_bufs) // 2) + 1):
+                break
+
+            if i % 2 == 1:
+                gc.collect()
 
         hits = [r for r in per_frame if r and r.get("matched")]
         checked = len([r for r in per_frame if r is not None])
@@ -479,7 +556,7 @@ class FaceEngine:
                 "exists": False,
                 "studentId": None,
                 "name": None,
-                "businessId": None,          # ← add this
+                "businessId": None,
                 "probability": 0.0,
                 "avg_score": 0.0,
                 "votes": 0,
@@ -490,13 +567,12 @@ class FaceEngine:
         for r in hits:
             sid = r["studentId"]
             if sid not in tally:
-                # also keep businessId
                 tally[sid] = [0, 0.0, r["name"], r["businessId"]]
             tally[sid][0] += 1
             tally[sid][1] += _f(r["score"])
 
         sid = max(tally, key=lambda k: (tally[k][0], tally[k][1]))
-        count, sum_score, name, bid = tally[sid]   # ← now 4 values
+        count, sum_score, name, bid = tally[sid]
         denom = max(checked, 1)
 
         agreement = count / denom
@@ -508,14 +584,14 @@ class FaceEngine:
             "exists": bool(exists),
             "studentId": sid,
             "name": name,
-            "businessId": bid,               # ← important
+            "businessId": bid,
             "probability": _f(probability),
             "avg_score": round(_f(avg_score), 4),
             "agreement": round(_f(agreement), 3),
             "votes": _i(count),
             "checked": _i(denom),
         }
-    
+
     # -------------------------------------------------- list students
     def list_students(self):
         seen = {}
@@ -523,7 +599,7 @@ class FaceEngine:
         while True:
             points, next_offset = self.client.scroll(
                 collection_name=self.collection,
-                limit=256,
+                limit=128,
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,

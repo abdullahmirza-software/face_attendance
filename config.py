@@ -42,6 +42,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 PROVIDERS = _list("PROVIDERS", ["CPUExecutionProvider"])
 DET_CONF = _float("DET_CONF", 0.5)            # SCRFD detector confidence
 EMBED_DIM = _int("EMBED_DIM", 512)
+LOW_RAM = _int("LOW_RAM", 1)                     # 1=low-RAM mode (no caching of embeddings)
+MAX_SIDE=_int("MAX_SIDE", 512)  # max side length for input images (downscale if larger)
 
 MAX_OPTIMIZATION_THREADS = _int("MAX_OPTIMIZATION_THREADS", 1)  # Qdrant background optimization threads
 INDEXING_THRESHOLD = _int("INDEXING_THRESHOLD", 20000)  # Qdr
