@@ -72,6 +72,9 @@ CAPTURE_MAX_W = _int("CAPTURE_MAX_W", 640)
 CAPTURE_QUALITY = _float("CAPTURE_QUALITY", 0.88)
 
 FACE_CROP_SCALE = _float("FACE_CROP_SCALE", 1.35)
+
+QDRANT_URL = _str("QDRANT_URL", None)
+QDRANT_API_KEY = _str("QDRANT_API_KEY", None)
 # ---- server ----
 HOST = _str("HOST", "0.0.0.0")
 PORT = _int("PORT", 8000)

@@ -1,0 +1,17 @@
+services:
+  sentry_app:
+    container_name: con_sentry_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HOST: ${HOST:-0.0.0.0}
+        PORT: ${PORT:-7860}
+    image: img_sentry_app
+    ports:
+      - "${PORT:-7860}:${PORT:-7860}"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+

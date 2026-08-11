@@ -44,8 +44,15 @@ class FaceEngine:
         self.recognizer = ArcFace(providers=C.PROVIDERS)
 
         # ---------- Embedded Qdrant ----------
-        qdrant_path = os.path.join(C.DATA_DIR, "qdrant_data")
-        self.client = QdrantClient(path=qdrant_path)
+        if C.QDRANT_URL and C.QDRANT_API_KEY:
+            self.client =  QdrantClient(
+                url=C.QDRANT_URL,
+                api_key=C.QDRANT_API_KEY
+            )
+        else:
+            qdrant_path = os.path.join(C.DATA_DIR, "qdrant_data")
+            self.client = QdrantClient(path=qdrant_path)
+
         self.collection = "faces"
         self._ensure_collection()
 
