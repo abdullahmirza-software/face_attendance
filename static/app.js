@@ -92,6 +92,14 @@ async function initVerify() {
 }
 
 verifyBtn.addEventListener("click", async () => {
+  const businessId = $("#verifyBusiness")?.value.trim() || "";
+
+  // Allow empty (search all) or a valid UUID v4
+  if (businessId && !isValidUuid(businessId)) {
+    renderVerifyError("Invalid Business ID — must be a valid UUID v4 or left empty.");
+    return;
+  }
+
   verifyBtn.disabled = true;
   const frame = $("#verifyFrame");
   frame.classList.add("scanning");
@@ -112,7 +120,6 @@ verifyBtn.addEventListener("click", async () => {
     const fd = new FormData();
     blobs.forEach((b, i) => fd.append("frames", b, `f${i}.jpg`));
 
-    const businessId = $("#verifyBusiness")?.value.trim();
     if (businessId) fd.append("businessId", businessId);
 
     const res = await fetch(`${API}/api/verify`, { method: "POST", body: fd });
@@ -184,15 +191,28 @@ let formOK = false;
 let capturing = false;
 let guideInFlight = false;
 
-function validateForm() {
-  formOK =
-    $("#fBusiness").value.trim() !== "" &&
-    $("#fStudent").value.trim() !== "" &&
-    $("#fName").value.trim() !== "";
-  enrollBtn.disabled = !formOK;
-  if (formOK && enrollHint.textContent === "Fill in details to begin")
-    enrollHint.textContent = "Ready — press Start capture";
+function isValidUuid(v) {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(v.trim());
 }
+
+function validateForm() {
+  const business = $("#fBusiness").value.trim();
+  const student  = $("#fStudent").value.trim();
+  const name     = $("#fName").value.trim();
+
+  formOK =
+    isValidUuid(business) &&
+    isValidUuid(student) &&
+    name.length > 0 &&
+    /\S/.test(name);          // not just spaces
+
+  enrollBtn.disabled = !formOK;
+
+  if (formOK && enrollHint.textContent === "Fill in details to begin") {
+    enrollHint.textContent = "Ready — press Start capture";
+  }
+}
+
 ["fBusiness", "fStudent", "fName"].forEach((id) =>
   $("#" + id).addEventListener("input", validateForm)
 );
