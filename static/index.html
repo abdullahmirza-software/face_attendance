@@ -72,8 +72,8 @@
               <div class="cam-hint" id="verifyHint">Starting camera…</div>
             </div>
             <div class="mb-3">
-              <label class="form-label">Business ID <span class="text-muted">(optional)</span></label>
-              <input type="text" id="verifyBusiness" class="form-control" placeholder="Leave empty to search all businesses" pattern="^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})?$">
+              <label class="lbl">Business ID <span class="hint-inline">(UUID, optional)</span></label>
+              <input class="form-control" id="verifyBusiness" type="text" placeholder="paste UUID or leave empty" pattern="^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})?$" title="Valid UUID v4 or empty"/>
             </div>
             <button class="btn btn-lg btn-primary w-100 mt-3" id="verifyBtn" disabled>
               <i class="bi bi-fingerprint"></i> Verify me

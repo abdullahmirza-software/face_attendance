@@ -204,7 +204,7 @@ function validateForm() {
     isValidUuid(business) &&
     isValidUuid(student) &&
     name.length > 0 &&
-    /\S/.test(name);          // not just spaces
+    /\S/.test(name);
 
   enrollBtn.disabled = !formOK;
 
@@ -320,7 +320,8 @@ async function runCapture() {
     enrollHint.textContent = "Selecting best shots…";
 
     const fd = new FormData();
-    fd.append("businessId", $("#fBusiness").value.trim());
+    const bizVal = $("#fBusiness").value.trim();
+    if (bizVal) fd.append("businessId", bizVal);
     fd.append("studentId", $("#fStudent").value.trim());
     fd.append("name", $("#fName").value.trim());
     blobs.forEach((b, i) => fd.append("frames", b, `a${i}.jpg`));
