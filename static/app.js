@@ -80,19 +80,31 @@ document.querySelectorAll(".mode-btn").forEach((btn) => {
 const verifyVideo = $("#verifyVideo");
 const verifyBtn = $("#verifyBtn");
 const verifyHint = $("#verifyHint");
+const verifyBusiness = $("#verifyBusiness");
+let verifyCamReady = false;
+
+function updateVerifyBtn() {
+  const businessId = verifyBusiness.value.trim();
+  const bizOK = !businessId || isValidUuid(businessId);
+  verifyBtn.disabled = !verifyCamReady || !bizOK;
+  verifyHint.textContent = bizOK
+    ? "Ready — center your face"
+    : "Invalid Business ID — must be a valid UUID v4 or left empty";
+}
+verifyBusiness.addEventListener("input", updateVerifyBtn);
 
 async function initVerify() {
   try {
     await cam.start(verifyVideo);
-    verifyHint.textContent = "Ready — center your face";
-    verifyBtn.disabled = false;
+    verifyCamReady = true;
+    updateVerifyBtn();
   } catch (e) {
     verifyHint.textContent = "Camera blocked. Allow access and reload.";
   }
 }
 
 verifyBtn.addEventListener("click", async () => {
-  const businessId = $("#verifyBusiness")?.value.trim() || "";
+  const businessId = verifyBusiness.value.trim();
 
   // Allow empty (search all) or a valid UUID v4
   if (businessId && !isValidUuid(businessId)) {
@@ -130,8 +142,7 @@ verifyBtn.addEventListener("click", async () => {
     renderVerifyError();
   } finally {
     frame.classList.remove("scanning");
-    verifyHint.textContent = "Ready — center your face";
-    verifyBtn.disabled = false;
+    updateVerifyBtn();
   }
 });
 
