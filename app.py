@@ -148,7 +148,7 @@ async def verify(
             "name": result["name"],
             "probability": result["probability"],
             "avg_score": result["avg_score"],
-            "loginTime": datetime.datetime.now().isoformat(timespec="seconds"),
+            "loginTime": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         }
         _append_login(entry)
         result["logged"] = entry
