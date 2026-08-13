@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: face-attendance
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python prefetch_models.py"
+    startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"

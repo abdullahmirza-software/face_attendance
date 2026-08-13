@@ -29,6 +29,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=user . .
 USER user
 
+# Bake the face-detection/recognition ONNX weights into the image so
+# startup never depends on GitHub being reachable (it was intermittently
+# closing connections mid-download, crashing boot). Runs as `user` so the
+# cache lands in /home/user/.uniface/models, the same $HOME the app uses
+# at runtime.
+RUN python prefetch_models.py
+
 # Hugging Face configuration
 ARG HOST
 ARG PORT
